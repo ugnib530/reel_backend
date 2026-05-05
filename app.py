@@ -1,15 +1,14 @@
 from flask import Flask, request, jsonify
 import yt_dlp
 import os
+import tempfile
 
 app = Flask(__name__)
 
-# Simple secret key to prevent others from abusing your server
 API_KEY = os.environ.get("API_KEY", "changeme123")
 
 @app.route("/extract", methods=["GET"])
 def extract():
-    # Check API key
     key = request.args.get("key")
     if key != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
@@ -18,6 +17,8 @@ def extract():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
+    sessionid = request.args.get("sessionid")
+
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -25,11 +26,22 @@ def extract():
         "format": "best[ext=mp4]/best",
     }
 
+    cookie_file = None
+
+    if sessionid:
+        cookie_content = (
+            "# Netscape HTTP Cookie File\n"
+            f".instagram.com\tTRUE\t/\tTRUE\t2999999999\tsessionid\t{sessionid}\n"
+        )
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write(cookie_content)
+            cookie_file = f.name
+        ydl_opts["cookiefile"] = cookie_file
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
 
-            # Get best video URL
             video_url = info.get("url")
             if not video_url:
                 formats = info.get("formats", [])
@@ -49,9 +61,18 @@ def extract():
             })
 
     except yt_dlp.utils.DownloadError as e:
+        error_lower = str(e).lower()
+        if any(kw in error_lower for kw in ["login", "private", "not available", "sorry", "restricted"]):
+            return jsonify({"error": "private_post", "requires_login": True}), 403
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+    finally:
+        if cookie_file:
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
 
 
 @app.route("/health", methods=["GET"])
