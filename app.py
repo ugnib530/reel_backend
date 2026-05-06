@@ -12,46 +12,39 @@ PRIVATE_KEYWORDS = ("login", "private", "not available", "sorry", "restricted", 
 
 # ─── YouTube via pytubefix ─────────────────────────────────────────────────
 def _extract_youtube(url: str) -> dict:
-    import requests
-
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "format": (
+            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/best[ext=mp4]/best"
+        ),
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"]
+            }
+        },
     }
 
-    payload = {
-        "url": url,
-        "videoQuality": "1080",
-        "filenameStyle": "basic",
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    video_url, audio_url = _resolve_streams(info)
+    if not video_url:
+        raise Exception("No video URL found")
+
+    return {
+        "video_url": video_url,
+        "audio_url": audio_url,
+        "title":     info.get("title") or "YouTube Video",
+        "thumbnail": info.get("thumbnail"),
+        "uploader":  info.get("uploader") or info.get("channel"),
+        "duration":  info.get("duration"),
+        "width":     info.get("width"),
+        "height":    info.get("height"),
     }
-
-    r = requests.post(
-        "https://api.cobalt.tools/",
-        json=payload,
-        headers=headers,
-        timeout=30,
-    )
-
-    if r.status_code != 200:
-        raise Exception(f"Cobalt API error: {r.status_code}")
-
-    data = r.json()
-    status = data.get("status")
-
-    if status in ("stream", "tunnel", "redirect"):
-        return {
-            "video_url": data["url"],
-            "audio_url": None,
-            "title":     "YouTube Video",
-            "thumbnail": None,
-            "uploader":  None,
-            "duration":  None,
-            "width":     None,
-            "height":    None,
-        }
-
-    raise Exception(f"Cobalt returned unexpected status: {status}")
-
 
 
 
