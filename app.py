@@ -23,28 +23,19 @@ def _extract_youtube(url: str) -> dict:
         ),
         "extractor_args": {
             "youtube": {
-                "player_client": ["android"]
+                "player_client": ["ios", "tv_embedded"],  # ← changed from ["android"]
             }
         },
+        "http_headers": {
+            "User-Agent": (
+                "com.google.ios.youtube/19.29.1 "
+                "(iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)"
+            )
+        },
+        "sleep_interval_requests": 1,   # slight delay to avoid rate limiting
     }
 
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=False)
 
-    video_url, audio_url = _resolve_streams(info)
-    if not video_url:
-        raise Exception("No video URL found")
-
-    return {
-        "video_url": video_url,
-        "audio_url": audio_url,
-        "title":     info.get("title") or "YouTube Video",
-        "thumbnail": info.get("thumbnail"),
-        "uploader":  info.get("uploader") or info.get("channel"),
-        "duration":  info.get("duration"),
-        "width":     info.get("width"),
-        "height":    info.get("height"),
-    }
 
 
 
