@@ -11,19 +11,17 @@ PRIVATE_KEYWORDS = ("login", "private", "not available", "sorry", "restricted", 
 
 
 # ─── YouTube via pytubefix ─────────────────────────────────────────────────
+
 def _extract_youtube(url: str) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        "format": (
-            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]"
-            "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
-            "/best[ext=mp4]/best"
-        ),
+        # Use a single-stream format — no merging needed with skip_download
+        "format": "best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best",
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "tv_embedded"],  # ← changed from ["android"]
+                "player_client": ["ios", "tv_embedded"],
             }
         },
         "http_headers": {
@@ -32,12 +30,37 @@ def _extract_youtube(url: str) -> dict:
                 "(iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)"
             )
         },
-        "sleep_interval_requests": 1,   # slight delay to avoid rate limiting
     }
 
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
+    # Guard: extract_info can return None
+    if info is None:
+        raise Exception("yt-dlp returned no info for this URL")
 
+    # Guard: playlist/search results wrap entries — unwrap the first one
+    if "entries" in info:
+        entries = list(info["entries"])
+        if not entries or entries[0] is None:
+            raise Exception("No video entries found")
+        info = entries[0]
 
+    video_url, audio_url = _resolve_streams(info)
+
+    if not video_url:
+        raise Exception("No video URL found")
+
+    return {
+        "video_url": video_url,
+        "audio_url": audio_url,
+        "title":     info.get("title") or "YouTube Video",
+        "thumbnail": info.get("thumbnail"),
+        "uploader":  info.get("uploader") or info.get("channel"),
+        "duration":  info.get("duration"),
+        "width":     info.get("width"),
+        "height":    info.get("height"),
+    }
 
 # ─── Instagram / Facebook via yt-dlp ──────────────────────────────────────
 
@@ -66,15 +89,18 @@ def _write_cookie_file(sessionid: str) -> str:
         f.write(content)
         return f.name
 
-
 def _resolve_streams(info: dict) -> tuple[str | None, str | None]:
+    if not info:                          # ← add this guard
+        return None, None
+
     video_url = None
     audio_url = None
 
     requested = info.get("requested_formats") or []
-
     if len(requested) >= 2:
         for fmt in requested:
+            if not isinstance(fmt, dict):  # ← skip any None/bad entries
+                continue
             vcodec = (fmt.get("vcodec") or "none").lower()
             acodec = (fmt.get("acodec") or "none").lower()
             if vcodec != "none" and acodec == "none":
@@ -86,13 +112,14 @@ def _resolve_streams(info: dict) -> tuple[str | None, str | None]:
         video_url = info.get("url")
         audio_url = None
 
-        if not video_url:
-            formats = info.get("formats") or []
-            mp4s = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
-            if mp4s:
-                video_url = mp4s[-1]["url"]
+    if not video_url:
+        formats = info.get("formats") or []
+        mp4s = [f for f in formats if isinstance(f, dict) and f.get("ext") == "mp4" and f.get("url")]
+        if mp4s:
+            video_url = mp4s[-1]["url"]
 
     return video_url, audio_url
+
 
 
 def _extract_ytdlp(url: str, sessionid: str | None) -> dict:
