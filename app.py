@@ -14,11 +14,10 @@ PRIVATE_KEYWORDS = ("login", "private", "not available", "sorry", "restricted", 
 
 def _extract_youtube(url: str) -> dict:
     from pytubefix import YouTube
-    from pytubefix.cli import on_progress
 
-    yt = YouTube(url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
+    # IOS client bypasses bot detection — no PO token needed
+    yt = YouTube(url, client='IOS')
 
-    # Try progressive stream first (video+audio combined, simpler for client)
     stream = (
         yt.streams
         .filter(progressive=True, file_extension="mp4")
@@ -37,7 +36,6 @@ def _extract_youtube(url: str) -> dict:
             "height":    stream.height,
         }
 
-    # Fallback: adaptive streams (separate video + audio, client merges with FFmpeg)
     video_stream = (
         yt.streams
         .filter(adaptive=True, file_extension="mp4", only_video=True)
