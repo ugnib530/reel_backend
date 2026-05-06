@@ -10,13 +10,67 @@ API_KEY = os.environ.get("API_KEY", "bingu_secret_2025")
 PRIVATE_KEYWORDS = ("login", "private", "not available", "sorry", "restricted", "requires")
 
 
-def _build_ydl_opts(sessionid: str | None, cookie_file: str | None) -> dict:
+# ─── YouTube via pytubefix ─────────────────────────────────────────────────
+
+def _extract_youtube(url: str) -> dict:
+    from pytubefix import YouTube
+    from pytubefix.cli import on_progress
+
+    yt = YouTube(url, on_progress_callback=on_progress, use_oauth=False, allow_oauth_cache=False)
+
+    # Try progressive stream first (video+audio combined, simpler for client)
+    stream = (
+        yt.streams
+        .filter(progressive=True, file_extension="mp4")
+        .get_highest_resolution()
+    )
+
+    if stream:
+        return {
+            "video_url": stream.url,
+            "audio_url": None,
+            "title":     yt.title,
+            "thumbnail": yt.thumbnail_url,
+            "uploader":  yt.author,
+            "duration":  yt.length,
+            "width":     stream.width,
+            "height":    stream.height,
+        }
+
+    # Fallback: adaptive streams (separate video + audio, client merges with FFmpeg)
+    video_stream = (
+        yt.streams
+        .filter(adaptive=True, file_extension="mp4", only_video=True)
+        .get_highest_resolution()
+    )
+    audio_stream = (
+        yt.streams
+        .filter(adaptive=True, only_audio=True)
+        .first()
+    )
+
+    if not video_stream:
+        raise Exception("No suitable YouTube stream found")
+
+    return {
+        "video_url": video_stream.url,
+        "audio_url": audio_stream.url if audio_stream else None,
+        "title":     yt.title,
+        "thumbnail": yt.thumbnail_url,
+        "uploader":  yt.author,
+        "duration":  yt.length,
+        "width":     video_stream.width,
+        "height":    video_stream.height,
+    }
+
+
+# ─── Instagram / Facebook via yt-dlp ──────────────────────────────────────
+
+def _build_ydl_opts(cookie_file: str | None) -> dict:
     opts = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
-        # Prefer H.264 video + m4a audio (widest device support)
-        # Falls back gracefully if H.264 isn't available
         "format": (
             "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]"
             "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
@@ -39,17 +93,12 @@ def _write_cookie_file(sessionid: str) -> str:
 
 
 def _resolve_streams(info: dict) -> tuple[str | None, str | None]:
-    """
-    Returns (video_url, audio_url).
-    audio_url is non-None only when Instagram used DASH (separate streams).
-    """
     video_url = None
     audio_url = None
 
     requested = info.get("requested_formats") or []
 
     if len(requested) >= 2:
-        # DASH: yt-dlp matched a video+audio format pair
         for fmt in requested:
             vcodec = (fmt.get("vcodec") or "none").lower()
             acodec = (fmt.get("acodec") or "none").lower()
@@ -57,13 +106,11 @@ def _resolve_streams(info: dict) -> tuple[str | None, str | None]:
                 video_url = fmt.get("url")
             elif acodec != "none" and vcodec == "none":
                 audio_url = fmt.get("url")
-    
+
     if not video_url:
-        # Progressive MP4 — single stream, audio is embedded
         video_url = info.get("url")
         audio_url = None
 
-        # Last resort: pick the best mp4 from the formats list
         if not video_url:
             formats = info.get("formats") or []
             mp4s = [f for f in formats if f.get("ext") == "mp4" and f.get("url")]
@@ -73,9 +120,48 @@ def _resolve_streams(info: dict) -> tuple[str | None, str | None]:
     return video_url, audio_url
 
 
+def _extract_ytdlp(url: str, sessionid: str | None) -> dict:
+    cookie_file = None
+    if sessionid:
+        cookie_file = _write_cookie_file(sessionid)
+
+    try:
+        opts = _build_ydl_opts(cookie_file)
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        video_url, audio_url = _resolve_streams(info)
+        if not video_url:
+            raise Exception("No video URL found")
+
+        return {
+            "video_url": video_url,
+            "audio_url": audio_url,
+            "title":     info.get("title") or "Video",
+            "thumbnail": info.get("thumbnail"),
+            "uploader":  info.get("uploader") or info.get("channel"),
+            "duration":  info.get("duration"),
+            "width":     info.get("width"),
+            "height":    info.get("height"),
+        }
+    finally:
+        if cookie_file:
+            try:
+                os.unlink(cookie_file)
+            except Exception:
+                pass
+
+
+# ─── Helpers ───────────────────────────────────────────────────────────────
+
+def _is_youtube(url: str) -> bool:
+    return "youtube.com" in url or "youtu.be" in url
+
+
+# ─── Routes ────────────────────────────────────────────────────────────────
+
 @app.route("/extract", methods=["GET"])
 def extract():
-    # ── Auth ──────────────────────────────────────────────────────────────────
     if request.args.get("key") != API_KEY:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -83,37 +169,26 @@ def extract():
     if not url:
         return jsonify({"error": "No URL provided"}), 400
 
-    sessionid  = request.args.get("sessionid")
-    cookie_file = None
-
-    if sessionid:
-        cookie_file = _write_cookie_file(sessionid)
+    sessionid = request.args.get("sessionid")
 
     try:
-        opts = _build_ydl_opts(sessionid, cookie_file)
-
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-
-        video_url, audio_url = _resolve_streams(info)
-
-        if not video_url:
-            return jsonify({"error": "No video URL found"}), 404
+        if _is_youtube(url):
+            data = _extract_youtube(url)
+        else:
+            data = _extract_ytdlp(url, sessionid)
 
         payload = {
-            "video_url": video_url,
-            "title":     info.get("title") or "Instagram Video",
-            "thumbnail": info.get("thumbnail"),
-            "uploader":  info.get("uploader") or info.get("channel"),
-            "duration":  info.get("duration"),
-            "width":     info.get("width"),
-            "height":    info.get("height"),
+            "video_url": data["video_url"],
+            "title":     data["title"],
+            "thumbnail": data["thumbnail"],
+            "uploader":  data["uploader"],
+            "duration":  data["duration"],
+            "width":     data["width"],
+            "height":    data["height"],
         }
 
-        # Only include audio_url when streams are separate (DASH)
-        # Flutter will merge them locally with FFmpeg when this key is present
-        if audio_url:
-            payload["audio_url"] = audio_url
+        if data.get("audio_url"):
+            payload["audio_url"] = data["audio_url"]
 
         return jsonify(payload), 200
 
@@ -124,13 +199,6 @@ def extract():
 
     except Exception as e:
         return jsonify({"error": f"Server error: {str(e)}"}), 500
-
-    finally:
-        if cookie_file:
-            try:
-                os.unlink(cookie_file)
-            except Exception:
-                pass
 
 
 @app.route("/health", methods=["GET"])
