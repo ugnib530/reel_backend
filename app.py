@@ -13,53 +13,41 @@ PRIVATE_KEYWORDS = ("login", "private", "not available", "sorry", "restricted", 
 # ─── YouTube via pytubefix ─────────────────────────────────────────────────
 
 def _extract_youtube(url: str) -> dict:
-    from pytubefix import YouTube
+    opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "format": (
+            "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]"
+            "/bestvideo[ext=mp4]+bestaudio[ext=m4a]"
+            "/best[ext=mp4]/best"
+        ),
+        # Forces yt-dlp to use YouTube's Android client — no bot detection
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android"]
+            }
+        },
+    }
 
-    # IOS client bypasses bot detection — no PO token needed
-    yt = YouTube(url, client='IOS')
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
 
-    stream = (
-        yt.streams
-        .filter(progressive=True, file_extension="mp4")
-        .get_highest_resolution()
-    )
-
-    if stream:
-        return {
-            "video_url": stream.url,
-            "audio_url": None,
-            "title":     yt.title,
-            "thumbnail": yt.thumbnail_url,
-            "uploader":  yt.author,
-            "duration":  yt.length,
-            "width":     stream.width,
-            "height":    stream.height,
-        }
-
-    video_stream = (
-        yt.streams
-        .filter(adaptive=True, file_extension="mp4", only_video=True)
-        .get_highest_resolution()
-    )
-    audio_stream = (
-        yt.streams
-        .filter(adaptive=True, only_audio=True)
-        .first()
-    )
-
-    if not video_stream:
-        raise Exception("No suitable YouTube stream found")
+    video_url, audio_url = _resolve_streams(info)
+    if not video_url:
+        raise Exception("No video URL found")
 
     return {
-        "video_url": video_stream.url,
-        "audio_url": audio_stream.url if audio_stream else None,
-        "title":     yt.title,
-        "thumbnail": yt.thumbnail_url,
-        "uploader":  yt.author,
-        "duration":  yt.length,
-        "width":     video_stream.width,
-        "height":    video_stream.height,
+        "video_url": video_url,
+        "audio_url": audio_url,
+        "title":     info.get("title") or "YouTube Video",
+        "thumbnail": info.get("thumbnail"),
+        "uploader":  info.get("uploader") or info.get("channel"),
+        "duration":  info.get("duration"),
+        "width":     info.get("width"),
+        "height":    info.get("height"),
     }
+
 
 
 # ─── Instagram / Facebook via yt-dlp ──────────────────────────────────────
